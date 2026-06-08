@@ -1,4 +1,5 @@
 -- main.lua
+
 -- screen
 
 WIDTH, HEIGHT = gfx.getDimensions()
@@ -24,6 +25,8 @@ TOOL_H = BOX_H / 2
 TOOL_MIDX = BOX_W / 2
 
 N_T = 2
+BRUSH = 1
+ERASER = 2
 ICON_H = (TOOL_H - M_4 - M_2) / N_T
 ICON_W = (BOX_W - M_4 - M_4) / 1
 ICON_D = math.min(ICON_W, ICON_H)
@@ -38,10 +41,10 @@ WEIGHT_H = BOX_H / 2
 WB_Y = BOX_H - WEIGHT_H
 WEIGHTS = { 1, 2, 4, 5, 6, 9, 11, 13 }
 
--- canvas
+--- canvas
 
 CAN_W = WIDTH - BOX_W
-CAN_H = HEIGHT - PAL_H - 1
+CAN_H = BOX_H - 1
 canvas = gfx.newCanvas(CAN_W, CAN_H)
 
 -- goose marker for selected weight, drawn around y = 0
@@ -73,19 +76,17 @@ COLORKEYS = {
 color = 0    
 bg_color = 0 
 weight = 3
-tool = 1     
+tool = BRUSH 
 brush_tip = nil
-last_x = 0
-last_y = 0
 
 -- range tests
 
 function inCanvasRange(x, y)
-  return (y < HEIGHT - PAL_H and BOX_W < x)
+  return (y < BOX_H and BOX_W < x)
 end
 
 function inPaletteRange(x, y)
-  return (HEIGHT - PAL_H <= y
+  return (BOX_H <= y
     and WIDTH - PAL_W <= x and x <= WIDTH)
 end
 
@@ -94,7 +95,7 @@ function inToolRange(x, y)
 end
 
 function inWeightRange(x, y)
-  return (x <= BOX_W and y < HEIGHT - PAL_H and WB_Y < y)
+  return (x <= BOX_W and y < BOX_H and WB_Y < y)
 end
 
 -- background and palette
@@ -298,7 +299,7 @@ end
 
 function drawToolbox()
   gfx.setColor(Color[Color.white])
-  gfx.rectangle("fill", 0, 0, BOX_W - 1, HEIGHT - PAL_H)
+  gfx.rectangle("fill", 0, 0, BOX_W - 1, BOX_H)
   gfx.setColor(Color[Color.white + Color.bright])
   gfx.rectangle("line", 0, 0, BOX_W - 1, BOX_H)
   drawTools()
@@ -309,7 +310,7 @@ end
 
 function getWeight()
   local aw = WEIGHTS[weight]
-  if tool == 2 then
+  if tool == ERASER then
     aw = aw * ERASER_SCALE
   end
   return aw
@@ -361,39 +362,46 @@ function setLineWeight(_, y)
 end
 
 function paintColor(btn)
-  if btn == 1 and tool == 1 then
+  if btn == 1 and tool == BRUSH then
     return color
   end
   return bg_color
 end
 
-function useCanvas(x, y, btn)
-  local aw = getWeight()
+function onCanvas(btn, paint)
   local idx = paintColor(btn)
   canvas:renderTo(function()
     gfx.setColor(Color[idx])
-    gfx.circle("fill", x - BOX_W, y, aw)
+    paint()
+  end)
+end
+
+function stamp(cx, cy, aw)
+  gfx.circle("fill", cx - BOX_W, cy, aw)
+end
+
+function useCanvas(x, y, btn)
+  local aw = getWeight()
+  onCanvas(btn, function()
+    stamp(x, y, aw)
   end)
 end
 
 function paintStroke(px, py, x, y)
   local aw = getWeight()
-  local step = aw * STEP_FRAC
-  local len = math.sqrt((x - px) ^ 2 + (y - py) ^ 2)
-  local n = math.ceil(len / step)
+  local ex = x - px
+  local ey = y - py
+  local len = math.sqrt(ex * ex + ey * ey)
+  local n = math.ceil(len / (aw * STEP_FRAC))
   for i = 1, n do
     local t = i / n
-    local sx = px + (x - px) * t
-    local sy = py + (y - py) * t
-    gfx.circle("fill", sx - BOX_W, sy, aw)
+    stamp(px + ex * t, py + ey * t, aw)
   end
 end
 
-function strokeCanvas(x, y, btn)
-  local idx = paintColor(btn)
-  canvas:renderTo(function()
-    gfx.setColor(Color[idx])
-    paintStroke(last_x, last_y, x, y)
+function strokeCanvas(x, y, dx, dy)
+  onCanvas(1, function()
+    paintStroke(x - dx, y - dy, x, y)
   end)
 end
 
@@ -421,23 +429,20 @@ function compy.doubleclick(x, y)
   point(x, y, 2)
 end
 
-function love.mousemoved(x, y)
-  if inCanvasRange(x, y) then
-    for btn = 1, 2 do
-      if love.mouse.isDown(btn) then
-        strokeCanvas(x, y, btn)
-      end
-    end
+function love.mousemoved(x, y, dx, dy)
+  if not inCanvasRange(x, y) then
+    return
   end
-  last_x = x
-  last_y = y
+  if love.mouse.isDown(1) then
+    strokeCanvas(x, y, dx, dy)
+  end
 end
 
---  keyboard
+-- keyboard
 
 function cycleTool()
   if tool >= N_T then
-    tool = 1
+    tool = BRUSH
   else
     tool = tool + 1
   end
