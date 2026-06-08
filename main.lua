@@ -41,7 +41,7 @@ WEIGHT_H = BOX_H / 2
 WB_Y = BOX_H - WEIGHT_H
 WEIGHTS = { 1, 2, 4, 5, 6, 9, 11, 13 }
 
---- canvas
+-- canvas
 
 CAN_W = WIDTH - BOX_W
 CAN_H = BOX_H - 1
@@ -73,10 +73,10 @@ COLORKEYS = {
 
 -- selected state
 
-color = 0    
-bg_color = 0 
+color = 0    -- black
+bg_color = 0 -- black
 weight = 3
-tool = BRUSH 
+tool = BRUSH -- brush
 brush_tip = nil
 
 -- range tests
@@ -405,28 +405,35 @@ function strokeCanvas(x, y, dx, dy)
   end)
 end
 
-REGIONS = {
-  { inPaletteRange, setColor },
-  { inCanvasRange, useCanvas },
+CONTROLS = {
   { inToolRange, setTool },
   { inWeightRange, setLineWeight },
 }
 
-function point(x, y, btn)
-  for i = 1, #REGIONS do
-    local r = REGIONS[i]
+CLICKS = {
+  { inPaletteRange, setColor },
+  { inCanvasRange, useCanvas },
+}
+
+function dispatch(regions, x, y, btn)
+  for i = 1, #regions do
+    local r = regions[i]
     if r[1](x, y) then
       r[2](x, y, btn)
     end
   end
 end
 
+function love.mousepressed(x, y, btn)
+  dispatch(CONTROLS, x, y, btn)
+end
+
 function compy.singleclick(x, y)
-  point(x, y, 1)
+  dispatch(CLICKS, x, y, 1)
 end
 
 function compy.doubleclick(x, y)
-  point(x, y, 2)
+  dispatch(CLICKS, x, y, 2)
 end
 
 function love.mousemoved(x, y, dx, dy)
