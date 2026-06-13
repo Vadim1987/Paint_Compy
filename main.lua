@@ -1,157 +1,103 @@
 -- main.lua
 
--- screen
+-- Paint: engine + interface presets over it (spec).
+-- Configuration in constants.lua, picture model in
+-- objects.lua, sticker art in stickers.lua.
 
-WIDTH, HEIGHT = gfx.getDimensions()
+require("constants")
+require("objects")
+require("stickers")
 
--- color palette
+-- the star sticker doubles as the sticker-tool icon
 
-BLOCK_W = WIDTH / 10
-BLOCK_H = BLOCK_W / 2
-PAL_H = 2 * BLOCK_H
-PAL_W = 8 * BLOCK_W
-SEL_W = 2 * BLOCK_W
-PAL_COLS = 8
+STAR_ID = stickerIndex("star")
 
--- tool pane
+-- pen-and-paper (spec #18): all event handlers run inside
+-- the framework's use_canvas, so the picture lives on the
+-- persistent virtual canvas. The handle is captured inside
+-- a handler (enterPreset), where the platform guarantees
+-- the live canvas is the active target. This capture and
+-- the blit in drawEngine are the only platform-behavior
+-- dependencies
 
-MARGIN = BLOCK_H / 10
-M_2 = MARGIN * 2
-M_4 = MARGIN * 4
-BOX_W = 1.5 * BLOCK_W
-BOX_H = HEIGHT - PAL_H
-MARG_L = BOX_W - M_2
-TOOL_H = BOX_H / 2
-TOOL_MIDX = BOX_W / 2
+PICTURE = nil
 
-N_T = 2
-BRUSH = 1
-ERASER = 2
-ICON_H = (TOOL_H - M_4 - M_2) / N_T
-ICON_W = (BOX_W - M_4 - M_4) / 1
-ICON_D = math.min(ICON_W, ICON_H)
-ICON_BASE = 100
-ICON_ANGLE = math.pi / 4
-ERASER_SCALE = 1.5
-STEP_FRAC = 0.5
+-- relative mode: the system pointer is off, the position
+-- lives in mx, my and is clamped off the screen edges; the
+-- program draws its own large, high-contrast arrow (spec)
 
--- line weight
+love.mouse.setRelativeMode(true)
+mx = WIDTH / 2
+my = HEIGHT / 2
 
-WEIGHT_H = BOX_H / 2
-WB_Y = BOX_H - WEIGHT_H
-WEIGHTS = { 1, 2, 4, 5, 6, 9, 11, 13 }
-
--- canvas
-
-CAN_W = WIDTH - BOX_W
-CAN_H = BOX_H - 1
-canvas = gfx.newCanvas(CAN_W, CAN_H)
-
--- goose marker for selected weight, drawn around y = 0
-
-GOOSE = { 0.303, 0.431, 0.431 }
-GOOSE_SHAPE = {
-  5 * MARGIN, -MARGIN,
-  3 * MARGIN, -MARGIN,
-  3 * MARGIN, MARGIN,
-  5 * MARGIN, MARGIN,
-  5 * MARGIN, M_2,
-  7 * MARGIN, 0,
-  5 * MARGIN, -M_2,
-}
-
-COLORKEYS = {
-  ['1'] = 0,
-  ['2'] = 1,
-  ['3'] = 2,
-  ['4'] = 3,
-  ['5'] = 4,
-  ['6'] = 5,
-  ['7'] = 6,
-  ['8'] = 7,
-}
-
--- selected state
-
-color = 0    -- black
-bg_color = 0 -- black
-weight = 3
-tool = BRUSH -- brush
-brush_tip = nil
-
--- range tests
-
-function inCanvasRange(x, y)
-  return (y < BOX_H and BOX_W < x)
+function clampAxis(v, dim)
+  return math.max(EDGE_PAD, math.min(dim - EDGE_PAD - 1, v))
 end
 
-function inPaletteRange(x, y)
-  return (BOX_H <= y
-    and WIDTH - PAL_W <= x and x <= WIDTH)
+-- screen state: the preset menu or the engine
+
+screen = "menu"
+preset = nil
+
+-- tray geometry: depends on the active preset
+
+tray_y = 0
+tray_row = 0
+preview_d = 0
+
+-- selected state. bg is the canvas background color --
+-- Alt+click on a swatch repaints it (replaces the old
+-- secondary-color path); held is the tray sticker
+-- dragged; notch is the teacher difficulty step (spec)
+
+color = Color.black
+bg = Color.black
+weight = DEFAULT_WEIGHT
+tool = BRUSH
+erasing = false
+held = nil
+notch = 0
+
+-- range tests: column regions use x < COL_W, canvas the rest
+
+function inCanvasRange(x, _)
+  return COL_W < x
 end
 
 function inToolRange(x, y)
-  return (x <= BOX_W and y <= TOOL_H)
+  return x < COL_W and y < TOOLS_H
+end
+
+function inPaletteRange(x, y)
+  return x < COL_W and CTRL_Y <= y and y < SEL_Y
 end
 
 function inWeightRange(x, y)
-  return (x <= BOX_W and y < BOX_H and WB_Y < y)
+  return x < COL_W and WB_Y <= y and y < ACTION_Y
 end
 
--- background and palette
+function inUndoRange(x, y)
+  return x < COL_W / 2 and ACTION_Y <= y
+end
+
+function inClearRange(x, y)
+  return COL_W / 2 <= x and x < COL_W and ACTION_Y <= y
+end
+
+function inTrayRange(x, y)
+  return x < COL_W and tray_y <= y
+end
+
+-- chrome
 
 function drawBackground()
-  gfx.setColor(Color[Color.black])
+  gfx.setColor(Color[bg])
   gfx.rectangle("fill", 0, 0, WIDTH, HEIGHT)
 end
 
-function drawPaletteOutline(y)
-  gfx.setColor(Color[bg_color])
-  gfx.rectangle("fill", 0, y - BLOCK_H,
-    BLOCK_W * 2, BLOCK_H * 2)
+function drawColumn()
   gfx.setColor(Color[Color.white])
-  gfx.rectangle("line", 0, y - BLOCK_H, SEL_W, PAL_H)
-  gfx.rectangle("line", SEL_W, y - BLOCK_H, WIDTH, PAL_H)
-end
-
-function selectedOutlineColor()
-  local lc = Color.white + Color.bright
-  if color == lc then
-    return Color.black
-  end
-  return lc
-end
-
-function drawSelectedColor(y)
-  gfx.setColor(Color[color])
-  gfx.rectangle("fill", BLOCK_W / 2, y - (BLOCK_H / 2),
-    BLOCK_W, BLOCK_H)
-  gfx.setColor(Color[selectedOutlineColor()])
-  gfx.rectangle("line", BLOCK_W / 2, y - (BLOCK_H / 2),
-    BLOCK_W, BLOCK_H)
-end
-
-function drawColorBox(c, x, y)
-  gfx.setColor(Color[c])
-  gfx.rectangle("fill", x, y, BLOCK_W, BLOCK_H)
-  gfx.setColor(Color[c + PAL_COLS])
-  gfx.rectangle("fill", x, y - BLOCK_H, BLOCK_W, BLOCK_H)
-  gfx.setColor(Color[Color.white])
-  gfx.rectangle("line", x, y, BLOCK_W, BLOCK_H)
-  gfx.rectangle("line", x, y - BLOCK_H, BLOCK_W, BLOCK_H)
-end
-
-function drawColorBoxes(y)
-  for c = 0, PAL_COLS - 1 do
-    drawColorBox(c, BLOCK_W * (c + 2), y)
-  end
-end
-
-function drawColorPalette()
-  local y = HEIGHT - BLOCK_H
-  drawPaletteOutline(y)
-  drawSelectedColor(y)
-  drawColorBoxes(y)
+  gfx.rectangle("fill", 0, 0, COL_W, HEIGHT)
 end
 
 -- tool icons
@@ -163,15 +109,24 @@ function beginIcon(cx, cy, s)
   gfx.rotate(ICON_ANGLE)
 end
 
-function getBrushTip()
-  if not brush_tip then
-    local curve = love.math.newBezierCurve(
-      -12, 12, -15, 20, -5, 30,
-      0, 35, 5, 30, 15, 20, 12, 12)
-    brush_tip = curve:render()
-  end
-  return brush_tip
-end
+-- flame tip of the brush icon, rendered once at load
+
+BRUSH_TIP = love.math.newBezierCurve(
+  -12,
+  12,
+  -15,
+  20,
+  -5,
+  30,
+  0,
+  35,
+  5,
+  30,
+  15,
+  20,
+  12,
+  12
+):render()
 
 function drawBrushHandle()
   gfx.setColor(0.6, 0.4, 0.2)
@@ -183,18 +138,18 @@ end
 function drawBrushFerrule()
   gfx.setColor(0.7, 0.7, 0.8)
   gfx.rectangle("fill", -10, -25, 20, 12)
-  gfx.setColor(0.9, 0.9, 1.0)
+  gfx.setColor(0.9, 0.9, 1)
   gfx.rectangle("fill", -8, -24, 3, 10)
 end
 
 function drawBrushBristles()
   gfx.setColor(0.2, 0.2, 0.2)
   gfx.rectangle("fill", -12, -13, 24, 25)
-  gfx.polygon("fill", getBrushTip())
+  gfx.polygon("fill", BRUSH_TIP)
 end
 
 function drawBrush(cx, cy)
-  beginIcon(cx, cy, ICON_D / ICON_BASE * 0.8)
+  beginIcon(cx, cy, (ICON_D / ICON_BASE) * 0.8)
   drawBrushHandle()
   drawBrushFerrule()
   drawBrushBristles()
@@ -207,60 +162,219 @@ function drawEraserBody()
   gfx.setColor(Color[Color.blue])
   gfx.rectangle("fill", -12, -40, 6, 60)
   gfx.rectangle("fill", 6, -40, 6, 60)
-  gfx.setColor(Color[Color.white + Color.bright])
+  gfx.setColor(Color[BRIGHT_WHITE])
   gfx.rectangle("fill", -12, 15, 24, 8)
-end
-
-function drawEraserCrumbs()
-  gfx.setColor(Color[Color.white])
-  gfx.circle("fill", 18, 25, 2)
-  gfx.circle("fill", 22, 30, 1.5)
-  gfx.circle("fill", 15, 32, 1)
 end
 
 function drawEraser(cx, cy)
   beginIcon(cx, cy, ICON_D / ICON_BASE)
   drawEraserBody()
-  drawEraserCrumbs()
   gfx.pop()
+end
+
+function drawSticker(i, cx, cy, d)
+  gfx.push()
+  gfx.translate(cx, cy)
+  STICKERS[i].draw(d)
+  gfx.pop()
+end
+
+function drawStickerTool(cx, cy)
+  drawSticker(STAR_ID, cx - ART_DX, cy - ART_DY, ICON_D * 0.8)
 end
 
 TOOLS = {
   drawBrush,
   drawEraser,
+  drawStickerTool
 }
 
 function toolIconColor(i)
   if i == tool then
     return Color.black
   end
-  return Color.white + Color.bright
+  return BRIGHT_WHITE
 end
 
 function drawToolIcon(i)
-  local tb = ICON_D
-  local x = TOOL_MIDX - (tb / 2)
-  local y = (i - 1) * (M_2 + tb)
+  local cx = (i - 1) * SLOT_W + SLOT_W / 2
+  local cy = TOOLS_H / 2
+  local x = cx - ICON_D / 2
+  local y = cy - ICON_D / 2
   gfx.setColor(Color[toolIconColor(i)])
-  gfx.rectangle("fill", x, y + M_2, tb, tb)
+  gfx.rectangle("fill", x, y, ICON_D, ICON_D)
   gfx.setColor(Color[Color.black])
-  gfx.rectangle("line", x, y + M_2, tb, tb)
-  TOOLS[i](TOOL_MIDX - M_2, y + (tb / 2) + M_4)
+  gfx.rectangle("line", x, y, ICON_D, ICON_D)
+  TOOLS[i](cx + ART_DX, cy + ART_DY)
 end
 
 function drawTools()
-  for i = 1, N_T do
-    drawToolIcon(i)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle("line", 0, 0, COL_W, TOOLS_H)
+  for i = 1, #(preset.tools) do
+    drawToolIcon(preset.tools[i])
   end
 end
 
+-- palette
+
+function drawSwatch(c, x, y)
+  gfx.setColor(Color[c])
+  gfx.rectangle("fill", x, y, SWATCH_W, ROW_H)
+  gfx.setColor(Color[Color.white])
+  gfx.rectangle("line", x, y, SWATCH_W, ROW_H)
+end
+
+function drawPaletteGrid()
+  for row = 0, PAL_COLS - 1 do
+    local y = CTRL_Y + row * ROW_H
+    drawSwatch(row, 0, y)
+    drawSwatch(row + PAL_COLS, SWATCH_W, y)
+  end
+end
+
+function outlineFor(c)
+  local lc = BRIGHT_WHITE
+  if c == lc then
+    return Color.black
+  end
+  return lc
+end
+
+function drawSelected(c, x)
+  local sx = x + MARGIN
+  local sy = SEL_Y + MARGIN
+  local w = SWATCH_W - M_2
+  local h = SEL_H - M_2
+  gfx.setColor(Color[c])
+  gfx.rectangle("fill", sx, sy, w, h)
+  gfx.setColor(Color[outlineFor(c)])
+  gfx.rectangle("line", sx, sy, w, h)
+end
+
+function drawSelectedSwatches()
+  drawSelected(color, 0)
+  drawSelected(bg, SWATCH_W)
+end
+
+function drawControlArea()
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle("line", 0, CTRL_Y, COL_W, CTRL_H)
+  drawPaletteGrid()
+  drawSelectedSwatches()
+end
+
+function drawTrayEntry(i)
+  local y = tray_y + ((i - 1) * tray_row)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle(
+    "line",
+    MARGIN,
+    y + MARGIN,
+    COL_W - M_2,
+    tray_row - M_2
+  )
+  drawSticker(i, COL_W / 2, y + (tray_row / 2), preview_d)
+end
+
+function drawTray()
+  for i = 1, #STICKERS do
+    drawTrayEntry(i)
+  end
+end
+
+function drawActionFrame(x, w)
+  local y = ACTION_Y + MARGIN
+  local h = ACTION_H - M_2
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle("fill", x, y, w, h)
+  gfx.setColor(Color[Color.black])
+  gfx.rectangle("line", x, y, w, h)
+end
+
+function drawUndoIcon(cx, cy, d)
+  local r = d * 0.32
+  local s = d * 0.2
+  gfx.setColor(Color[Color.black])
+  gfx.setLineWidth(3)
+  gfx.arc("line", "open", cx, cy, r, -math.pi, 0.9)
+  gfx.setLineWidth(1)
+  local ax = cx - r
+  gfx.polygon("fill", ax - s, cy, ax + s, cy, ax, cy + s)
+end
+
+function drawTrashIcon(cx, cy, d)
+  gfx.push()
+  gfx.translate(cx, cy)
+  gfx.setColor(Color[Color.black])
+  gfx.rectangle("line", -d * 0.25, -d * 0.2, d * 0.5, d * 0.55)
+  gfx.rectangle("fill", -d * 0.32, -d * 0.3, d * 0.64, d * 0.08)
+  gfx.rectangle("fill", -d * 0.1, -d * 0.38, d * 0.2, d * 0.08)
+  gfx.pop()
+end
+
+function drawActionRow()
+  local w = (COL_W - (3 * MARGIN)) / 2
+  local cy = ACTION_Y + (ACTION_H / 2)
+  local x2 = (2 * MARGIN) + w
+  drawActionFrame(MARGIN, w)
+  drawUndoIcon(MARGIN + (w / 2), cy, ACTION_H * 0.8)
+  drawActionFrame(x2, w)
+  drawTrashIcon(x2 + (w / 2), cy, ACTION_H * 0.8)
+end
+
+function drawPaintControls()
+  drawControlArea()
+  drawWeightSelector()
+  drawActionRow()
+end
+
+MODE_CONTROLS = {
+  drawPaintControls,
+  drawPaintControls,
+  drawTray
+}
+
+-- goose marker for the selected weight, drawn around y = 0
+
+GOOSE_SHAPE = {
+  2 * MARGIN, -MARGIN / 2,
+  2 * MARGIN, MARGIN / 2,
+  7 * MARGIN, MARGIN / 2,
+  7 * MARGIN, MARGIN,
+  9 * MARGIN, 0,
+  7 * MARGIN, -MARGIN,
+  7 * MARGIN, -MARGIN / 2
+}
+
 -- line weight selector
+
+CURSOR_PTS = { }
+
+function cursorPoint(x, y)
+  CURSOR_PTS[#CURSOR_PTS + 1] = x
+  CURSOR_PTS[#CURSOR_PTS + 1] = y
+end
+
+cursorPoint(0, 0)
+cursorPoint(0, 36)
+cursorPoint(8, 28)
+cursorPoint(14, 41)
+cursorPoint(20, 38)
+cursorPoint(14, 25)
+cursorPoint(25, 25)
+
+CURSOR_TRIS = love.math.triangulate(CURSOR_PTS)
+
+GOOSE_TRIS = love.math.triangulate(GOOSE_SHAPE)
 
 function drawGooseMarker(mid)
   gfx.push()
   gfx.translate(0, mid)
   gfx.setColor(GOOSE)
-  gfx.polygon("fill", GOOSE_SHAPE)
+  for i = 1, #GOOSE_TRIS do
+    gfx.polygon("fill", GOOSE_TRIS[i])
+  end
   gfx.setColor(Color[Color.black])
   gfx.setLineWidth(2)
   gfx.polygon("line", GOOSE_SHAPE)
@@ -271,16 +385,16 @@ end
 function drawWeightBar(mid, lw)
   gfx.setColor(Color[Color.black])
   local aw = WEIGHTS[lw]
-  gfx.rectangle("fill", BOX_W / 3, mid - (aw / 2),
-    BOX_W / 2, aw)
+  gfx.rectangle("fill", COL_W / 3, mid - (aw / 2),
+    COL_W / 2, aw)
 end
 
 function drawWeightRow(i, h)
   local y = WB_Y + MARGIN + (i * h)
   local lw = i + 1
   local mid = y + (h / 2)
-  gfx.setColor(Color[Color.white + Color.bright])
-  gfx.rectangle("fill", MARGIN, y, MARG_L, h)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle("fill", MARGIN, y, COL_W - M_2, h)
   if lw == weight then
     drawGooseMarker(mid)
   end
@@ -288,25 +402,11 @@ function drawWeightRow(i, h)
 end
 
 function drawWeightSelector()
-  gfx.setColor(Color[Color.white + Color.bright])
-  gfx.rectangle("line", 0, BOX_H - WEIGHT_H,
-    BOX_W - 1, WEIGHT_H)
   local h = (WEIGHT_H - M_2) / #WEIGHTS
   for i = 0, #WEIGHTS - 1 do
     drawWeightRow(i, h)
   end
 end
-
-function drawToolbox()
-  gfx.setColor(Color[Color.white])
-  gfx.rectangle("fill", 0, 0, BOX_W - 1, BOX_H)
-  gfx.setColor(Color[Color.white + Color.bright])
-  gfx.rectangle("line", 0, 0, BOX_W - 1, BOX_H)
-  drawTools()
-  drawWeightSelector()
-end
-
--- weight, target, frame
 
 function getWeight()
   local aw = WEIGHTS[weight]
@@ -316,147 +416,483 @@ function getWeight()
   return aw
 end
 
-function drawTarget()
-  local x, y = love.mouse.getPosition()
-  if inCanvasRange(x, y) then
-    gfx.setColor(Color[Color.white])
-    gfx.circle("line", x, y, getWeight())
+-- a small center dot marks the exact action point under
+-- any tool cursor
+
+function drawHotspot()
+  gfx.setColor(Color[Color.black])
+  gfx.circle("fill", mx, my, 1)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.circle("fill", mx, my, 0.5)
+end
+
+-- brush cursor: a ring the size of the stroke (PS brush)
+
+function brushCursor()
+  if inCanvasRange(mx, my) then
+    gfx.setColor(Color[BRIGHT_WHITE])
+    gfx.circle("line", mx, my, getWeight())
+    drawHotspot()
   end
 end
 
-function love.draw()
+-- eraser cursor: a square frame the size of the erase zone
+
+function eraserCursor()
+  if inCanvasRange(mx, my) then
+    local r = getWeight()
+    gfx.setColor(Color[Color.black])
+    gfx.rectangle("line", mx - r, my - r, r * 2, r * 2)
+    drawHotspot()
+  end
+end
+
+function drawCrosshair()
+  local d = CROSS_D
+  gfx.setColor(Color[Color.black])
+  gfx.line(mx - d, my, mx + d, my)
+  gfx.line(mx, my - d, mx, my + d)
+end
+
+-- sticker cursor: held preview, else a crosshair marking
+-- where the sticker would land
+
+function stickerCursor()
+  if held then
+    drawSticker(held, mx, my, STICKERS[held].size)
+  elseif inCanvasRange(mx, my) then
+    drawCrosshair()
+  end
+end
+
+POINTER = {
+  brushCursor,
+  eraserCursor,
+  stickerCursor
+}
+
+function drawCursor()
+  gfx.push()
+  gfx.translate(mx, my)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  for i = 1, #CURSOR_TRIS do
+    gfx.polygon("fill", CURSOR_TRIS[i])
+  end
+  gfx.setColor(Color[Color.black])
+  gfx.polygon("line", CURSOR_PTS)
+  gfx.pop()
+end
+
+-- the only per-frame work: composite the persistent
+-- picture (cost independent of the object count, spec),
+-- draw the chrome over any stamp bleed, then the live
+-- pointer overlay. gfx.draw tints by the current color,
+-- so the blit needs the identity tint (1, 1, 1) -- black
+-- from drawBackground would render the picture invisible
+
+function drawEngine()
   drawBackground()
-  drawToolbox()
-  drawColorPalette()
-  gfx.draw(canvas, BOX_W)
-  drawTarget()
+  gfx.setColor(1, 1, 1)
+  gfx.draw(PICTURE)
+  drawColumn()
+  if hasStrip() then
+    drawTools()
+  end
+  MODE_CONTROLS[tool]()
+  POINTER[tool]()
+end
+
+-- preset menu (the landing screen, spec)
+
+function boardIcon(cx, cy, d)
+  drawSticker(STAR_ID, cx, cy, d)
+end
+
+function fullIcon(cx, cy, d)
+  local s = d / ICON_D
+  gfx.push()
+  gfx.translate(cx, cy)
+  gfx.scale(s, s)
+  drawBrush(0, 0)
+  gfx.pop()
+end
+
+PRESET_ICONS = {
+  boardIcon,
+  fullIcon
+}
+
+function menuButtonY(i)
+  return MENU_Y + ((i - 1) * (MENU_H + MENU_GAP))
+end
+
+function drawMenuButton(i)
+  local y = menuButtonY(i)
+  gfx.setColor(Color[Color.white])
+  gfx.rectangle("fill", MENU_X, y, MENU_W, MENU_H)
+  gfx.setColor(Color[BRIGHT_WHITE])
+  gfx.rectangle("line", MENU_X, y, MENU_W, MENU_H)
+  local cy = y + (MENU_H / 2)
+  PRESET_ICONS[i](MENU_X + (MENU_H / 2), cy, MENU_ICON)
+  gfx.setColor(Color[Color.black])
+  local fh = gfx.getFont():getHeight()
+  gfx.print(PRESETS[i].id, MENU_X + MENU_H, cy - (fh / 2))
+end
+
+function drawMenu()
+  drawBackground()
+  for i = 1, #PRESETS do
+    drawMenuButton(i)
+  end
+end
+
+SCREEN_DRAW = {
+  menu = drawMenu,
+  engine = drawEngine
+}
+
+function love.draw()
+  SCREEN_DRAW[screen]()
+  if not (screen == "engine" and inCanvasRange(mx, my)) then
+    drawCursor()
+  end
 end
 
 -- click handlers
 
-function setColor(x, y, btn)
-  local row = math.modf((HEIGHT - y) / BLOCK_H)
-  local col = math.modf((x - SEL_W) / BLOCK_W)
-  if btn == 1 then
-    color = col + (PAL_COLS * row)
-  elseif btn > 1 then
-    bg_color = col + (PAL_COLS * row)
+function gridIndex(v, origin, cell)
+  return math.modf((v - origin) / cell) + 1
+end
+
+function setColor(x, y, alt)
+  local row = gridIndex(y, CTRL_Y, ROW_H) - 1
+  local col = gridIndex(x, 0, SWATCH_W) - 1
+  local c = row + (col * PAL_COLS)
+  if alt then
+    bg = c
+  else
+    color = c
   end
 end
 
-function setTool(_, y)
-  local h = ICON_D + M_4
-  local sel = math.modf(y / h) + 1
-  if sel <= N_T then
-    tool = sel
+function setTool(x, _)
+  local sel = gridIndex(x, 0, SLOT_W)
+  if sel <= #(preset.tools) then
+    tool = preset.tools[sel]
   end
 end
 
 function setLineWeight(_, y)
-  local ws = #WEIGHTS
-  local h = WEIGHT_H / ws
-  local lw = math.modf((y - WB_Y) / h) + 1
-  if lw > 0 and lw <= ws then
-    weight = lw
-  end
-end
-
-function paintColor(btn)
-  if btn == 1 and tool == BRUSH then
-    return color
-  end
-  return bg_color
-end
-
-function onCanvas(btn, paint)
-  local idx = paintColor(btn)
-  canvas:renderTo(function()
-    gfx.setColor(Color[idx])
-    paint()
-  end)
+  local h = WEIGHT_H / #WEIGHTS
+  weight = gridIndex(y, WB_Y, h)
 end
 
 function stamp(cx, cy, aw)
-  gfx.circle("fill", cx - BOX_W, cy, aw)
+  gfx.circle("fill", cx, cy, aw)
 end
 
-function useCanvas(x, y, btn)
-  local aw = getWeight()
-  onCanvas(btn, function()
-    stamp(x, y, aw)
-  end)
-end
+-- stamps along the segment ending at point index i, so the
+-- live stroke and the replay produce identical pixels
 
-function paintStroke(px, py, x, y)
-  local aw = getWeight()
-  local ex = x - px
-  local ey = y - py
+function stampSpan(o, i)
+  local pts = o.points
+  local ex = pts[i] - pts[i - 2]
+  local ey = pts[i + 1] - pts[i - 1]
   local len = math.sqrt(ex * ex + ey * ey)
-  local n = math.ceil(len / (aw * STEP_FRAC))
-  for i = 1, n do
-    local t = i / n
-    stamp(px + ex * t, py + ey * t, aw)
+  local n = math.ceil(len / (o.weight * STEP_FRAC))
+  for k = 1, n do
+    local t = k / n
+    stamp(pts[i - 2] + ex * t, pts[i - 1] + ey * t, o.weight)
   end
 end
 
-function strokeCanvas(x, y, dx, dy)
-  onCanvas(1, function()
-    paintStroke(x - dx, y - dy, x, y)
-  end)
+function brushPress(x, y)
+  beginStroke(x, y, color, getWeight())
+  gfx.setColor(Color[stroke.color])
+  stamp(x, y, stroke.weight)
 end
 
-CONTROLS = {
-  { inToolRange, setTool },
-  { inWeightRange, setLineWeight },
+function eraseAt(x, y)
+  local i = topmostAt(x, y, getWeight())
+  if i then
+    removeObject(i)
+    replay()
+  end
+end
+
+function erasePress(x, y)
+  erasing = true
+  eraseAt(x, y)
+end
+
+TOOL_PRESS = {
+  brushPress,
+  erasePress
 }
 
-CLICKS = {
-  { inPaletteRange, setColor },
-  { inCanvasRange, useCanvas },
+function canvasPress(x, y, alt)
+  TOOL_PRESS[tool](x, y, alt)
+end
+
+function extendStroke(x, y)
+  strokePoint(x, y)
+  gfx.setColor(Color[stroke.color])
+  stampSpan(stroke, #(stroke.points) - 1)
+end
+
+-- rendering an object from the model
+
+function drawObjectStroke(o)
+  local pts = o.points
+  gfx.setColor(Color[o.color])
+  stamp(pts[1], pts[2], o.weight)
+  for i = 3, #pts - 1, 2 do
+    stampSpan(o, i)
+  end
+end
+
+function drawObjectSticker(o)
+  drawSticker(o.id, o.x, o.y, STICKERS[o.id].size * o.scale)
+end
+
+DRAW_OBJECT = {
+  stroke = drawObjectStroke,
+  sticker = drawObjectSticker
 }
 
-function dispatch(regions, x, y, btn)
+function drawObject(o)
+  DRAW_OBJECT[o.kind](o)
+end
+
+-- rebuilds the picture from the object list; called only
+-- when the list changes (erase/undo), never per frame (spec)
+
+function replay()
+  gfx.clear()
+  for i = 1, #objects do
+    drawObject(objects[i])
+  end
+end
+
+function pickSticker(_, y)
+  held = gridIndex(y, tray_y, tray_row)
+end
+
+function placeSticker(i, x, y)
+  addSticker(i, x, y, STICKERS[i].size / 2)
+  drawObjectSticker(objects[#objects])
+end
+
+function dropSticker(x, y)
+  if inCanvasRange(x, y) then
+    placeSticker(held, x, y)
+  end
+  held = nil
+end
+
+-- notch -1 seeds the canvas with three stickers so a child
+-- staring at a blank page has somewhere to start (spec)
+
+function applySeeds()
+  for i = 1, #SEEDS do
+    local s = SEEDS[i]
+    placeSticker(stickerIndex(s.id), s.x + COL_W, s.y)
+  end
+end
+
+function notchDown()
+  if notch == 0 then
+    notch = -1
+    applySeeds()
+  end
+end
+
+function notchUp()
+  if notch == -1 then
+    notch = 0
+  end
+end
+
+-- clear is a visible action because it is undoable: the
+-- model keeps the cleared array by reference (no copy)
+
+function doClear()
+  clearPicture()
+  replay()
+end
+
+function doUndo()
+  undo()
+  replay()
+end
+
+function clearPress()
+  doClear()
+end
+
+function undoPress()
+  doUndo()
+end
+
+-- input dispatch: all actions on raw mouse events (spec)
+-- Alt+left picks the background; right button never arrives
+-- (the platform delivers it as a raw Esc, which is unbound)
+
+-- click regions: each list is a sequence of test/action
+-- pairs, all built the same way through addRegion
+
+function addRegion(list, test, action)
+  list[#list + 1] = {
+    test,
+    action
+  }
+end
+
+PAINT_REGIONS = { }
+addRegion(PAINT_REGIONS, inPaletteRange, setColor)
+addRegion(PAINT_REGIONS, inCanvasRange, canvasPress)
+addRegion(PAINT_REGIONS, inToolRange, setTool)
+addRegion(PAINT_REGIONS, inWeightRange, setLineWeight)
+addRegion(PAINT_REGIONS, inUndoRange, undoPress)
+addRegion(PAINT_REGIONS, inClearRange, clearPress)
+
+STICKER_REGIONS = { }
+addRegion(STICKER_REGIONS, inToolRange, setTool)
+addRegion(STICKER_REGIONS, inTrayRange, pickSticker)
+
+-- a single-tool preset has no tool strip: the only active
+-- region left of the canvas is the tray; clicking the empty
+-- canvas with the sticker tool does nothing (spec)
+
+BOARD_REGIONS = { }
+addRegion(BOARD_REGIONS, inTrayRange, pickSticker)
+
+MODE_REGIONS = {
+  PAINT_REGIONS,
+  PAINT_REGIONS,
+  STICKER_REGIONS
+}
+
+function dispatch(regions, x, y, alt)
   for i = 1, #regions do
     local r = regions[i]
     if r[1](x, y) then
-      r[2](x, y, btn)
+      r[2](x, y, alt)
     end
   end
 end
 
-function love.mousepressed(x, y, btn)
-  dispatch(CONTROLS, x, y, btn)
+function hasStrip()
+  return 1 < #(preset.tools)
 end
 
-function compy.singleclick(x, y)
-  dispatch(CLICKS, x, y, 1)
+function regionsFor()
+  if hasStrip() then
+    return MODE_REGIONS[tool]
+  end
+  return BOARD_REGIONS
 end
 
-function compy.doubleclick(x, y)
-  dispatch(CLICKS, x, y, 2)
+function enginePress(x, y, alt)
+  dispatch(regionsFor(), x, y, alt)
 end
 
-function love.mousemoved(x, y, dx, dy)
-  if not inCanvasRange(x, y) then
+-- entering a preset starts a fresh picture: re-picking from
+-- the menu is the documented relaunch-style clear (spec)
+
+function setTrayArea()
+  tray_y = 0
+  if hasStrip() then
+    tray_y = TOOLS_H
+  end
+  tray_row = (HEIGHT - tray_y) / #STICKERS
+  preview_d = tray_row - M_2
+end
+
+function enterPreset(i)
+  PICTURE = gfx.getCanvas()
+  bg = Color.black
+  preset = PRESETS[i]
+  tool = preset.tools[1]
+  setTrayArea()
+  clearObjects()
+  replay()
+  if notch == -1 then
+    applySeeds()
+  end
+  screen = "engine"
+end
+
+function enterMenu()
+  if stroke then
+    commitStroke()
+  end
+  held = nil
+  erasing = false
+  screen = "menu"
+end
+
+function inMenuButton(i, x, y)
+  local by = menuButtonY(i)
+  return MENU_X <= x and x <= MENU_X + MENU_W
+       and by <= y
+       and y <= by + MENU_H
+end
+
+function menuPress(x, y)
+  for i = 1, #PRESETS do
+    if inMenuButton(i, x, y) then
+      enterPreset(i)
+    end
+  end
+end
+
+SCREEN_PRESS = {
+  menu = menuPress,
+  engine = enginePress
+}
+
+function love.mousepressed()
+  SCREEN_PRESS[screen](mx, my, Key.alt())
+end
+
+function love.mousemoved(_, _, dx, dy)
+  mx = clampAxis(mx + (dx * POINTER_SPEED), WIDTH)
+  my = clampAxis(my + (dy * POINTER_SPEED), HEIGHT)
+  if not inCanvasRange(mx, my) then
     return
   end
-  if love.mouse.isDown(1) then
-    strokeCanvas(x, y, dx, dy)
+  if stroke then
+    extendStroke(mx, my)
+  elseif erasing then
+    eraseAt(mx, my)
   end
+end
+
+function love.mousereleased()
+  if stroke then
+    commitStroke()
+  end
+  if held then
+    dropSticker(mx, my)
+  end
+  erasing = false
 end
 
 -- keyboard
 
 function cycleTool()
-  if tool >= N_T then
-    tool = BRUSH
-  else
-    tool = tool + 1
+  local n = #(preset.tools)
+  for i = 1, n do
+    if preset.tools[i] == tool then
+      tool = preset.tools[(i % n) + 1]
+      return
+    end
   end
 end
 
 function weightDown()
-  if weight > 1 then
+  if 1 < weight then
     weight = weight - 1
   end
 end
@@ -469,8 +905,8 @@ end
 
 KEYS = {
   tab = cycleTool,
-  ['['] = weightDown,
-  [']'] = weightUp,
+  ["["] = weightDown,
+  ["]"] = weightUp
 }
 
 function setColorKey(k)
@@ -483,10 +919,72 @@ function setColorKey(k)
   end
 end
 
-function love.keypressed(k)
+-- Shift+Esc steps back: engine -> preset menu -> console.
+-- raw Esc (the platform's right-click) is dropped (spec)
+
+function exitToConsole()
+  gfx.clear()
+  love.mouse.setRelativeMode(false)
+  stop()
+end
+
+function escapePressed()
+  if Key.ctrl() then
+    love.mouse.setRelativeMode(false)
+    return
+  end
+  if not Key.shift() then
+    return
+  end
+  if screen == "engine" then
+    enterMenu()
+  else
+    exitToConsole()
+  end
+end
+
+-- teacher chords: Ctrl+Alt+Down seeds, Ctrl+Alt+Up steps
+-- back up; plain arrows stay ignored (spec)
+
+CHORDS = {
+  down = notchDown,
+  up = notchUp,
+}
+
+function chordKey(k)
+  local chord = CHORDS[k]
+  if chord and Key.ctrl() and Key.alt() then
+    chord()
+  end
+end
+
+CTRL_KEYS = {
+  z = doUndo,
+}
+
+function ctrlKey(k)
+  local action = CTRL_KEYS[k]
+  if action and Key.ctrl() then
+    action()
+  end
+end
+
+function engineKey(k)
   local action = KEYS[k]
   if action then
     action()
   end
+  ctrlKey(k)
+  chordKey(k)
   setColorKey(k)
+end
+
+function love.keypressed(k)
+  if k == "escape" then
+    escapePressed()
+    return
+  end
+  if screen == "engine" then
+    engineKey(k)
+  end
 end

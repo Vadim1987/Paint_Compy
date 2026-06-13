@@ -1,206 +1,203 @@
 ## Paint
 
-The Paint(brush) game is a touch-first project. It can, of course, be used with a mouse, and will offer keyboard conveniences, but it's foremost intent is to be used on a touchscreen.
+Paint is a mouse-driven creative sandbox. The current Compy
+hardware has no touchscreen, so everything — painting, erasing,
+dragging stickers — happens with the mouse and a couple of
+modifier keys.
+
+Launching `paint` opens a small **preset menu** with two choices
+built over the same engine:
+
+* **sticker board** — just the canvas and a tray of stickers.
+  The calmest surface, for the youngest children.
+* **full interface** — brush, eraser, the 16-color palette,
+  line thickness, and the sticker tray.
+
+`Shift+Esc` steps back: from the engine to the preset menu, and
+from the menu out to the console.
 
 ### Interface design
 
-We have 3 main areas of interest:
-* the color palette
-* the tool pane
-* the canvas
+The screen is a fixed 1024×600 — wide and short, so vertical
+space is the scarce resource. All chrome therefore lives in one
+column down the left edge, and the canvas keeps the full screen
+height. Nothing is ever sized from the screen *width*; the
+column is sized from its own width and the screen *height*.
 
 ```plain
 +--------+--------------------------------------------------+
-│  +--+  │                                                  │
-│  |  |  │                                                  │
-│  +--+  │                                                  │
-│  tool  │                                                  │
-│  +--+  │                                                  │
-│  |  |  │                                                  │
-│  +--+  │                                                  │
-│--------│                     canvas                       │
-│        │                                                  │
-│        │                                                  │
-│  line  │                                                  │
-│        │                                                  │
-│        │                                                  │
-│        │                                                  │
-+-----------+-----+-----+-----+-----+-----+-----+-----+-----+
-│  +-----+  │     │     │     │     │     │     │     │     │
-+  │color│  +-----+-----+-----+-----+-----+-----+-----+-----+
-│  +-----+  │     │     │     │     │     │     │     │     │
-+-----------+-----+-----+-----+-----+-----+-----+-----+-----+
+| brush  |                                                  |
+| eraser |                                                  |
+| sticker|                                                  |
+|--------|                                                  |
+| colors |                                                  |
+|  or    |                     canvas                       |
+| tray   |                                                  |
+|--------|                                                  |
+| line   |                                                  |
+|--------|                                                  |
+| clear  |                                                  |
++--------+--------------------------------------------------+
 ```
 
-The tool window is further split in two: tool selection and tool size (or line width).
-Similarly, the color palette is split between the controls for selecting and displaying said selection.
-We can draw freely on the rest of the space.
+The middle band is mode-dependent: with the brush or eraser
+selected it shows the palette (8 rows, each base color beside
+its brighter variant) and two swatches — the primary color and
+the canvas background; with
+the sticker tool it shows the tray instead, since color and
+thickness do not apply to stickers. In the 'sticker board'
+preset the tray takes the whole column.
 
-#### Palette
-
-Building on the 16-color theme, we will divide the screen into 10 columns (8 colors + 2 for display).
-Then halve these columns to get the row height. Display the selected background on a double block, with the foreground color in the middle.
+All of the geometry derives from two numbers:
 
 ```lua
-width, height = gfx.getDimensions()
---- color palette
-block_w = width / 10
-block_h = block_w / 2
-pal_h = 2 * block_h
-pal_w = 8 * block_w
-sel_w = 2 * block_w
+WIDTH, HEIGHT = gfx.getDimensions()
+COL_W = WIDTH * 0.2
 ```
 
-#### Toolbox
+### The object model
 
-It shall be 1.5 times column width, the height taking the rest of the screen not used by the palette. We will also add a margin so the controls have some breathing room from the side.
+The picture's source of truth is not pixels — it is an ordered
+**list of objects** (`objects.lua`). A stroke is a polyline plus
+color and thickness; a sticker is an id plus position and scale.
+Each object carries a bounding box.
 
 ```lua
---- tool pane
-margin = block_h / 10
-box_w = 1.5 * block_w
-box_h = height - pal_h
+stroke = {
+  kind = "stroke",
+  color = c,
+  weight = w,
+  points = { x, y },
+  ...
+}
 ```
 
-Currently, there's only two tools: a brush and an eraser. We have to divide the available space between them, being mindful that they will need to fit on different screen sizes.
-We will have double margins on the top and bottom, and quadruple to the sides, displaying them on top of each other, that comes out to:
+This split between the model and the rendering is the
+load-bearing idea of the program: because the list *is* the
+drawing, we can erase one object, undo, or (someday) save —
+none of which a flat bitmap allows.
+
+### Drawing
+
+Compy runs project code — including every event handler —
+inside `use_canvas`, targeting a persistent virtual canvas that
+keeps its contents between frames. Paint leans on that
+("pen-and-paper" drawing): a brush stroke is stamped onto the
+canvas once, at the moment the mouse moves, and stays there.
+Nothing is redrawn per frame.
+
+On entering a preset — inside a mouse handler, where the
+live canvas is the active target — we grab its handle:
 
 ```lua
-m_4 = margin * 4
-n_t = 2
-icon_h = (tool_h - m_4) / n_t
-icon_w = (box_w - m_4 - m_4) / 1
-icon_d = math.min(icon_w, icon_h)
+PICTURE = gfx.getCanvas()
 ```
 
-Depending on the screen, we might be more limited based on either height or width, so the square icon's size will be the determined by the smaller of the two. This ensures that we can comfortably draw them on any reasonable size. There might be edge cases of screens so small that we can't display properly, a shortcoming whose solution is left as an exercise to the reader.
+and keep a deliberately tiny `love.draw`: composite the
+picture, draw the chrome over it, then the live pointer
+overlay — a thin circle showing the current brush size. Its
+cost does not depend on how much the child has drawn.
 
-### Interaction
+A stroke is a chain of filled circles. Mouse events arrive
+sparsely when the hand moves fast, so each new point is
+connected to the previous one by interpolated stamps — the same
+`stampSpan` walk is used live and during replay, so a replayed
+stroke is pixel-identical to the original.
 
-#### Pointing and clicking
+### Erasing
 
-A very central theme in this application is determining where the user clicks/taps. For starters there's the drawing, but also switching tools and colors.
-
-Click and taps will start out in the `point()` function:
+The eraser removes **whole objects**: touch a stroke and the
+stroke disappears, touch a sticker and the sticker goes. On
+press (or drag) the engine finds the topmost object under the
+cursor — a cheap bounding-box test first, then a fine test:
+point-to-polyline distance for strokes, the box itself for
+stickers — removes it from the list, and **replays** the
+remaining objects onto the canvas:
 
 ```lua
-function point(x, y, btn)
-  if inPaletteRange(x, y) then
-    setColor(x, y, btn)
+function replay()
+  gfx.clear()
+  for i = 1, #objects do
+    drawObject(objects[i])
   end
-  if inCanvasRange(x, y) then
-    useCanvas(x, y, btn)
-  end
-  if inToolRange(x, y) then
-    selectTool(x, y)
-  end
-  if inWeightRange(x, y) then
-    setLineWeight(y)
-  end
 end
 ```
 
-Simply check where the click is, and forward it to the respective handler. If we set up our functions correctly, there should not be more than one thing happening in any single interaction.
+The replay happens only when the list changes (erase, undo,
+clear) — never per frame. For the object counts this activity
+reaches, that is the whole performance story.
 
-For example:
+### Stickers
 
-```lua
-function inCanvasRange(x, y)
-  return (y < height - pal_h and box_w < x)
-end
+Eight stickers — circle, square, star, tree, house, sun,
+flower, cloud — live in a manifest (`stickers.lua`); each entry
+carries an `id`, a footprint `size` (96 px), and a `draw`
+function that renders it with graphics primitives. Swapping in
+artist-made images later means carrying an `image` instead of
+`draw`, with no change to the model or the tool.
 
-function inPaletteRange(x, y)
-  return (height - pal_h <= y
-    and width - pal_w <= x and x <= width)
-end
-```
+Press and hold a tray preview to pick a sticker up; while held
+it follows the pointer at full size; release over the canvas to
+place it (one object in the list); release anywhere else to
+cancel silently. Placed stickers are not moved or resized — to
+remove one, erase it.
 
-To be registered on the canvas (more on that later), a the x coordinate has to be strictly larger than the toolbox width, and strictly smaller than `height - palette height`. On the other hand,
-th function that detects palette click uses `<=`. Not that it would be that terrible to have a single pixel width of overlap/hiatus, but this way each one is accounted for.
+### Undo and clear
 
-Once we know what interface element we are on, we can move on to the tiny bit more advanced math:
-
-```lua
-function setColor(x, y)
-  local row = math.modf((height - y) / block_h)
-  local col = math.modf((x - sel_w) / block_w)
-
-  color = col + (8 * row)
-end
-```
-
-To find out which color block was clicked, we have to do some integer division.
-`math.modf(n)` splits up a `n` into it's integer and fractional part.
-```lua
-local i, f = math.modf(2.3)
--- i = 2 , f = 0.3
-```
-
-In our case, we are only interested in the whole number to navigate our grid, and work back to a color index, preferably the same one that was used for displaying it:
+`Ctrl+Z` undoes one step: it restores the last clear, or drops
+the last object. The trash button at the bottom of the column
+clears the picture — and because clearing must be undoable, the
+model saves the old list **by reference**:
 
 ```lua
-  local y = height - block_h
-  for c = 0, 7 do
-    local x = block_w * (c + 2)
-    gfx.setColor(Color[c])
-    gfx.rectangle("fill", x, y, width, block_h)
-    gfx.setColor(Color[c + 8])
-    gfx.rectangle("fill", x, y - block_h, width, block_h)
-    gfx.setColor(Color[Color.white])
-    gfx.rectangle("line", x, y, width, block_h)
-    gfx.rectangle("line", x, y - block_h, width, block_h)
-  end
-```
-
-## Drawing
-
-Okay, let's create some pictures. It's time we talked about what a canvas is. In LOVE parlance, a canvas is a piece of drawable graphics, just like lines and rectangles, but we can draw multiple things on them. This can already be useful if for drawing the same thing multiple times on the screen. Of course, that's always possible with repeating most of the code, or using functions (a better idea). However, with a canvas, we can do the rendering off-screen, and put the whole result up at once. When drawing heavy graphics, this is a lot easier on the hardware.
-
-We will use a canvas to record the player's drawings. Not only is this very convenient, it spares the horrible amount of work it would take to store every click and the tool used, and re-render it on each frame.
-
-Let's see how this works. First, we set up the canvas:
-
-```lua
-can_w = width - box_w
-can_h = height - pal_h - 1
-canvas = gfx.newCanvas(can_w, can_h)
-```
-
-The default size of a canvas would be equivalent to the screen, but we have some UI elements here, so a bit smaller makes more sense. However, this does mean we need to calculate the offsets properly when detecting clicks and displaying it.
-
-We can draw on a canvas (and not the screen) by calling the `setCanvas()` function with the canvas as the parameter, doing the various operations as we normally would, then calling it again, this time without any parameters, which resets the main canvas as active.
-
-This is somewhat cumbersome, and there *is* a shortcut provided: `Canvas` objects have a `renderTo()` function, which does much the same for us automatically, provided we wrap the drawing operations in a function:
-
-```lua
-function useCanvas(x, y, btn)
-  local aw = getWeight()
-  canvas:renderTo(function()
-    -- ...
-    gfx.circle("fill", x - box_w, y, aw)
-  end)
+function clearPicture()
+  cleared = objects
+  objects = {}
 end
 ```
 
-Note the _x_ coordinate, which is offset by `box_w` (the width of the side panel). When drawing, we go the opposite direction: `gfx.draw(canvas, box_w)`.
+Lua tables are not copied on assignment, so this costs nothing
+regardless of picture size; undo swaps the array back. Any new
+object supersedes the stash, and the garbage collector reclaims
+the old picture once nothing references it.
 
-### Click detection
+### Input
 
-There's one more challenge to tackle: with touch, we don't have second button, no right-click. If we want a secondary use case (like setting the background color instead of the foreground), we have to come up with some other way.
-Double clicks/taps are a workable solution, but there is a problem: detecting them is not trivial. Any second click is necessarily preceded by a first one, so you need to kind of hold off on doing anything and wait to see if a second tap follows.
+Everything is driven by raw mouse events. A press is routed by
+region — palette, canvas, tool strip, thickness, tray — through
+small dispatch tables, so exactly one thing happens per click.
 
-To solve for this, we created custom handlers for single and double clicks:
+There is no double-click anywhere: the platform's double-click
+detection must wait out a delay window before confirming a
+single click, which makes every tap feel late. Paint acts on
+`love.mousepressed` directly, so the response lands within a
+frame. The `Alt` modifier controls the canvas background
+instead: `Alt`+click a swatch repaints the background in that
+color. There is no secondary drawing color — the brush always
+paints the primary. The background lives outside the object
+list, so erasing reveals it and undo/clear do not touch it.
 
-```lua
-function compy.singleclick(x, y)
-  point(x, y, 1)
-end
+A real right-button click reaches the program as a raw `Esc`
+key; `paint` binds neither, so both are silently dropped.
 
-function compy.doubleclick(x, y)
-  point(x, y, 2)
-end
-```
+Keyboard conveniences:
 
-A drawback of this is it feels somewhat less snappy, because of the wait time, but there isn't really a way around this. Another quirk is that if you move the cursor or your finger, it can't be registered as a double click on the same point, so instead of trying the impossible and deciding which position between the two should be the relevant one, these are considered invalid and no action is taken.
+* `Tab` — next tool
+* `[` / `]` — thinner / thicker line
+* `1`–`8` — base colors; `Shift+1`–`8` — brighter variants
+* `Ctrl+Z` — undo (one step)
+* `Shift+Esc` — back to the preset menu / exit
+* `Ctrl+Alt+Down` / `Ctrl+Alt+Up` — teacher chords for the
+  seed-sticker notch: down pre-places a tree, a house, and a
+  sun so a blank page is less intimidating; up returns to
+  blank starts
 
-With these, our rudimentary Paint app is complete.
+Anything not listed is ignored.
+
+### Files
+
+* `main.lua` — the engine: screens, layout, input dispatch,
+  rendering
+* `constants.lua` — configuration and derived layout, pure data
+* `objects.lua` — the object model, no drawing
+* `stickers.lua` — the sticker manifest and placeholder art
