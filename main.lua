@@ -390,8 +390,7 @@ end
 function drawWeightBar(mid, lw)
   gfx.setColor(Color[Color.black])
   local aw = WEIGHTS[lw]
-  gfx.rectangle("fill", COL_W / 3, mid - (aw / 2),
-    COL_W / 2, aw)
+  gfx.rectangle("fill", WBAR_X, mid - (aw / 2), WBAR_W, aw)
 end
 
 function drawWeightRow(i, h)
