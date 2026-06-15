@@ -105,14 +105,14 @@ function stickerBox(o, half)
   o.y2 = o.y + half
 end
 
-function addSticker(id, x, y, half)
+function addSticker(id, x, y, half, scale)
   markAdd()
   local o = {
     kind = "sticker",
     id = id,
     x = x,
     y = y,
-    scale = 1,
+    scale = scale,
     pad = 0
   }
   stickerBox(o, half)

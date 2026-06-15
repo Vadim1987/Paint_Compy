@@ -137,10 +137,12 @@ artist-made images later means carrying an `image` instead of
 `draw`, with no change to the model or the tool.
 
 Press and hold a tray preview to pick a sticker up; while held
-it follows the pointer at full size; release over the canvas to
-place it (one object in the list); release anywhere else to
-cancel silently. Placed stickers are not moved or resized — to
-remove one, erase it.
+it follows the pointer and the mouse wheel scales it (each notch
+by `SCALE_STEP`, clamped to `SCALE_MIN`..`SCALE_MAX`); release
+over the canvas to place it at that size (one object in the
+list), release anywhere else to cancel silently. The chosen
+scale is baked into the placed object. A placed sticker is not
+moved or rescaled after the fact — to remove one, erase it.
 
 ### Undo and clear
 

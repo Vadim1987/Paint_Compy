@@ -103,6 +103,12 @@ POINTER_SPEED = 2.5
 
 CROSS_D = 12
 
+-- sticker scaling by mouse wheel: step per notch and bounds
+
+SCALE_STEP = 0.1
+SCALE_MIN = 0.3
+SCALE_MAX = 3
+
 -- goose marker color; the marker shape is built in main
 
 GOOSE = {

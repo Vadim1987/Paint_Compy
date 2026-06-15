@@ -30,6 +30,10 @@ love.mouse.setRelativeMode(true)
 mx = WIDTH / 2
 my = HEIGHT / 2
 
+function clampScale(s)
+  return math.max(SCALE_MIN, math.min(SCALE_MAX, s))
+end
+
 function clampAxis(v, dim)
   return math.max(EDGE_PAD, math.min(dim - EDGE_PAD - 1, v))
 end
@@ -56,6 +60,7 @@ weight = DEFAULT_WEIGHT
 tool = BRUSH
 erasing = false
 held = nil
+held_scale = 1
 notch = 0
 
 -- range tests: column regions use x < COL_W, canvas the rest
@@ -170,6 +175,12 @@ function drawEraser(cx, cy)
   beginIcon(cx, cy, ICON_D / ICON_BASE)
   drawEraserBody()
   gfx.pop()
+end
+
+-- a sticker's on-canvas footprint in px at a given scale
+
+function stickerPx(id, scale)
+  return STICKERS[id].size * scale
 end
 
 function drawSticker(i, cx, cy, d)
@@ -486,7 +497,7 @@ end
 
 function stickerCursor()
   if held then
-    drawSticker(held, mx, my, STICKERS[held].size)
+    drawSticker(held, mx, my, stickerPx(held, held_scale))
   elseif inCanvasRange(mx, my) then
     drawCrosshair()
   end
@@ -681,7 +692,7 @@ function drawObjectStroke(o)
 end
 
 function drawObjectSticker(o)
-  drawSticker(o.id, o.x, o.y, STICKERS[o.id].size * o.scale)
+  drawSticker(o.id, o.x, o.y, stickerPx(o.id, o.scale))
 end
 
 DRAW_OBJECT = {
@@ -705,16 +716,24 @@ end
 
 function pickSticker(_, y)
   held = gridIndex(y, tray_y, tray_row)
+  held_scale = 1
 end
 
-function placeSticker(i, x, y)
-  addSticker(i, x, y, STICKERS[i].size / 2)
+function love.wheelmoved(_, dy)
+  if held then
+    held_scale = clampScale(held_scale + (dy * SCALE_STEP))
+  end
+end
+
+function placeSticker(i, x, y, scale)
+  local half = stickerPx(i, scale) / 2
+  addSticker(i, x, y, half, scale)
   drawObjectSticker(objects[#objects])
 end
 
 function dropSticker(x, y)
   if inCanvasRange(x, y) then
-    placeSticker(held, x, y)
+    placeSticker(held, x, y, held_scale)
   end
   held = nil
 end
@@ -725,7 +744,7 @@ end
 function applySeeds()
   for i = 1, #SEEDS do
     local s = SEEDS[i]
-    placeSticker(stickerIndex(s.id), s.x + COL_W, s.y)
+    placeSticker(stickerIndex(s.id), s.x + COL_W, s.y, 1)
   end
 end
 
